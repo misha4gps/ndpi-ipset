@@ -1,0 +1,12 @@
+# list id from /usr/include/ndpi/ndpi_protocol_ids.h
+
+45	NDPI_PROTOCOL_WHATSAPP_CALL
+142	NDPI_PROTOCOL_WHATSAPP		
+242	NDPI_PROTOCOL_WHATSAPP_FILES
+
+whatsapp
+face
+youtube
+tls.microsoft
+tls.llm
+tls.azure

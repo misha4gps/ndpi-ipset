@@ -1,0 +1,23 @@
+# Build artifacts
+ndpi-ipset
+*.o
+*.a
+*.so
+
+# Temporary files
+*~
+# swap files
+.swp
+
+# Logs
+.log
+
+# ipset and runtime state (not source)
+/tmp/
+
+# macOS
+.DS_Store
+
+# Editor directories
+.vscode/
+.idea/

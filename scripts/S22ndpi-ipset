@@ -1,0 +1,49 @@
+#!/bin/sh
+
+ENABLED=yes
+
+PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/home/ndpi
+. ndpi-ipset-start.sh ndpi_export
+PROCS=$ndpi_path
+DESC="$PROCS programm"
+
+start() {
+    echo "Starting $DESC..."
+    [ -z "$(which $PROCS)" ] && {
+        echo "not found $PROCS"
+        exit 0
+    }
+
+    . ndpi-ipset-start.sh init
+    start-stop-daemon -S -b -x $PROCS $interface $proto_file "$add_line" "$del_line" $int_nets || {
+       echo "Failed to start $DESC"
+       exit 1
+    }
+}
+
+stop() {
+    echo "Stopping $DESC ..."
+    start-stop-daemon -K -n $PROCS
+    ndpi-ipset-start.sh clean
+}
+
+#. /opt/etc/init.d/rc.func
+# exit 0
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        sleep 1
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
