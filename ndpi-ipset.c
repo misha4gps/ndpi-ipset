@@ -81,6 +81,22 @@ struct flow_info {
     uint32_t packets_processed;
 };
 
+enum frame_type {
+    FRAME_UNKNOWN = 0,
+    FRAME_ETHERNET,
+    FRAME_PPP,
+    FRAME_SLL,
+    FRAME_RAW_IP
+};
+
+struct sll_header {
+    uint16_t sll_pkttype;
+    uint16_t sll_hatype;
+    uint16_t sll_halen;
+    uint8_t  sll_addr[8];
+    uint16_t sll_protocol;
+} __attribute__((packed));
+
 static int raw_socket = -1;
 static struct ndpi_detection_module_struct *ndpi_ctx = NULL;
 static struct flow_info flows[MAX_FLOWS];
@@ -112,7 +128,8 @@ struct flow_info* get_flow_info(uint32_t src_ip, uint32_t dst_ip,
                                uint16_t src_port, uint16_t dst_port, uint8_t protocol);
 int process_packet(unsigned char *buffer, int length);
 int parse_ethernet_frame(unsigned char *buffer, int length, 
-                        struct iphdr **ip_header, void **l4_header, int *l4_len);
+                        struct iphdr **ip_header, void **l4_header, int *l4_len,
+                        unsigned char **iphdr_buf, int *iphdr_buf_len);
 void cleanup_old_flows();
 void mark_traffic_exec(const struct flow_info *flow, const char *exec_line);
 void to_lower(char *dest, const char *src);
@@ -370,18 +387,70 @@ struct flow_info* get_flow_info(uint32_t src_ip, uint32_t dst_ip,
     return NULL;
 }
 
+enum frame_type determine_frame_type(const unsigned char *buf, int length)
+{
+    // PPP?
+    if (length >= 4 &&
+        buf[0] == 0xFF && buf[1] == 0x03 &&
+        buf[2] == 0x00 && buf[3] == 0x21)
+        return FRAME_PPP;
+
+    // SLL (Linux cooked capture)
+    if (length >= (int)sizeof(struct sll_header)) {
+        const struct sll_header *sll = (const struct sll_header*)buf;
+        if (ntohs(sll->sll_protocol) == ETH_P_IP)
+            return FRAME_SLL;
+    }
+
+    // Ethernet II
+    if (length >= (int)sizeof(struct ethhdr)) {
+        const struct ethhdr *eth = (const struct ethhdr*)buf;
+        if (ntohs(eth->h_proto) == ETH_P_IP)
+            return FRAME_ETHERNET;
+    }
+
+    // RAW IP (AF_INET SOCK_RAW)
+    if (length >= (int)sizeof(struct iphdr)) {
+        const struct iphdr *ip = (const struct iphdr*)buf;
+        if (ip->version == 4)
+            return FRAME_RAW_IP;
+    }
+
+    return FRAME_UNKNOWN;
+}
+
 int parse_ethernet_frame(unsigned char *buffer, int length, 
-        struct iphdr **ip_header, void **l4_header, int *l4_len) {
-    struct ethhdr *eth_header;
+        struct iphdr **ip_header, void **l4_header, int *l4_len,
+        unsigned char **iphdr_buf, int *iphdr_buf_len) {
+
     struct iphdr *ip;
 
     if (length < (int)sizeof(struct ethhdr)) return -1;
-    
-    eth_header = (struct ethhdr*)buffer;
-    if (ntohs(eth_header->h_proto) != ETH_P_IP) return -1;
 
-    buffer += sizeof(struct ethhdr);
-    length -= sizeof(struct ethhdr);
+    switch (determine_frame_type(buffer, length)) {
+
+    case FRAME_PPP:
+        buffer += 4;      // FF 03 00 21
+        length -= 4;
+        break;
+
+    case FRAME_SLL:
+        buffer += sizeof(struct sll_header);
+        length -= sizeof(struct sll_header);
+        break;
+
+    case FRAME_ETHERNET:
+        buffer += sizeof(struct ethhdr);
+        length -= sizeof(struct ethhdr);
+        break;
+
+    case FRAME_RAW_IP:
+        // no header to skip
+        break;
+
+    default:
+        return -1;
+    }
     
     if (length < (int)sizeof(struct iphdr)) return -1;
 
@@ -394,6 +463,9 @@ int parse_ethernet_frame(unsigned char *buffer, int length,
     *ip_header = ip;
     *l4_header = buffer + ip_header_len;
     *l4_len = length - ip_header_len;
+
+    *iphdr_buf = buffer;
+    *iphdr_buf_len = length;
 
     return 0;
 }
@@ -710,10 +782,12 @@ int process_packet(unsigned char *buffer, int length) {
     int l4_len;
     struct flow_info *flow;
     ndpi_protocol protocol;
+    uint8_t *iphdr_buf;
+    int iphdr_buf_len;
 
     total_packets++;
     
-    if (parse_ethernet_frame(buffer, length, &ip_header, &l4_header, &l4_len) < 0) {
+    if (parse_ethernet_frame(buffer, length, &ip_header, &l4_header, &l4_len, &iphdr_buf, &iphdr_buf_len) < 0) {
         return -1;
     }
 
@@ -751,8 +825,7 @@ int process_packet(unsigned char *buffer, int length) {
 
     protocol = ndpi_detection_process_packet(
         ndpi_ctx, flow->ndpi_flow,
-        (uint8_t*)(buffer + sizeof(struct ethhdr)),
-        length - sizeof(struct ethhdr),
+        iphdr_buf, iphdr_buf_len,
         time(NULL)
     );
 
