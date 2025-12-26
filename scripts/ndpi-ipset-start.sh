@@ -3,7 +3,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ndpi_init()
 {
-
+    echo "initialization routing"
     #if ! grep -q "^321[[:space:]]\+rt_vpn$" /opt/etc/iproute2/rt_tables; then
     #    echo "321 rt_vpn" >> /opt/etc/iproute2/rt_tables
     #fi
@@ -92,6 +92,7 @@ case "$1" in
         ;;
     start)
         ndpi_export
+        ndpi_init
         ndpi_start
         ;;
     clean)

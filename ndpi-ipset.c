@@ -79,6 +79,7 @@ struct flow_info {
     int is_detected;
     uint8_t detection_completed;
     uint32_t packets_processed;
+    uint8_t int_net;
 };
 
 enum frame_type {
@@ -127,6 +128,7 @@ void signal_handler(int sig);
 struct flow_info* get_flow_info(uint32_t src_ip, uint32_t dst_ip, 
                                uint16_t src_port, uint16_t dst_port, uint8_t protocol);
 int process_packet(unsigned char *buffer, int length);
+int is_internal_ip(uint32_t ip);
 int parse_ethernet_frame(unsigned char *buffer, int length, 
                         struct iphdr **ip_header, void **l4_header, int *l4_len,
                         unsigned char **iphdr_buf, int *iphdr_buf_len);
@@ -137,11 +139,11 @@ int ipset_add_entry(const struct in_addr *ip);
 int ipset_del_entry(const struct in_addr *ip);
 
 
-
-int detect_proto(const struct flow_info *flow, int *protocol_id, const char *app) {
+int detect_proto(const struct flow_info *flow, int *protocol_id, const char *app, uint8_t *int_net) {
     ndpi_protocol protocol = flow->detected_protocol;
     char app_lower[128] = {0};
     to_lower(app_lower, app);
+    *int_net = 0;
 
     if (
         (*protocol_id = zbx_vector_uint16_bsearch(
@@ -151,33 +153,34 @@ int detect_proto(const struct flow_info *flow, int *protocol_id, const char *app
             &detected_protocols, protocol.master_protocol, zbx_default_uint16_compare_func)
         ) != FAIL
     ) {
-        for (int i = 0; i < internal_nets.values_num; i++) {
-            if ((flow->dst_ip & internal_nets.values[i].mask) == internal_nets.values[i].network) {
-                DBG_PRINTF("[p]:Internal network match: %s/%d\n", 
-                    inet_ntoa(*(struct in_addr*)&internal_nets.values[i].network), 
-                    __builtin_popcount(internal_nets.values[i].mask));
-                return 0;
-            }
+        if (0 != (*int_net = is_internal_ip(flow->dst_ip)) && 0 != is_internal_ip(flow->src_ip)) {
+            return 0;
         }
-
         return 1;
     }
 
     for (int i = 0; i < detected_apps.values_num; i++) {
         if (strstr(app_lower, detected_apps.values[i].name) != NULL) {
-            for (int i = 0; i < internal_nets.values_num; i++) {
-                if ((flow->dst_ip & internal_nets.values[i].mask) == internal_nets.values[i].network) {
-                    DBG_PRINTF("[a]:Internal network match: %s/%d\n", 
-                        inet_ntoa(*(struct in_addr*)&internal_nets.values[i].network), 
-                        __builtin_popcount(internal_nets.values[i].mask));
-                    return 0;
-                }
-            }
             *protocol_id = i;
+            if (0 != (*int_net = is_internal_ip(flow->dst_ip)) && 0 != is_internal_ip(flow->src_ip)) {
+                return 0;
+            }
             return 1;
         }
     }
 
+    return 0;
+}
+
+int is_internal_ip(uint32_t ip) {
+    for (int i = 0; i < internal_nets.values_num; i++) {
+        if ((ip & internal_nets.values[i].mask) == internal_nets.values[i].network) {
+            DBG_PRINTF("Internal network match: %s/%d\n", 
+                inet_ntoa(*(struct in_addr*)&internal_nets.values[i].network), 
+                __builtin_popcount(internal_nets.values[i].mask));
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -308,12 +311,13 @@ void cleanup_old_flows() {
         ) {
             if (flows[i].is_detected && del_line)
             {
-                int idx = zbx_vector_ip_ref_bsearch(&ipset_ips, (ip_ref_t){flows[i].dst_ip, 0}, zbx_default_uint32_compare_func);
+                u_int32_t    proc_ip = (0 == flows[i].int_net ? flows[i].dst_ip : flows[i].src_ip);
+                int idx = zbx_vector_ip_ref_bsearch(&ipset_ips, (ip_ref_t){proc_ip, 0}, zbx_default_uint32_compare_func);
                 if (idx != FAIL) {
                     if (ipset_ips.values[idx].count == 1) {
                         mark_traffic_exec(&flows[i], del_line);
                         zbx_vector_ip_ref_remove(&ipset_ips, idx);
-                        ipset_del_entry((struct in_addr*)&flows[i].dst_ip);
+                        ipset_del_entry((struct in_addr*)&proc_ip);
                     } else {
                         ipset_ips.values[idx].count--;
                     }
@@ -451,7 +455,7 @@ int parse_ethernet_frame(unsigned char *buffer, int length,
     default:
         return -1;
     }
-    
+
     if (length < (int)sizeof(struct iphdr)) return -1;
 
     ip = (struct iphdr*)buffer;
@@ -760,11 +764,19 @@ void mark_traffic_exec(const struct flow_info *flow, const char *exec_line) {
     inet_ntop(AF_INET, &src_addr, sip_str, sizeof(sip_str));
     inet_ntop(AF_INET, &dst_addr, dip_str, sizeof(dip_str));
 
-    snprintf(cmd, sizeof(cmd), exec_line,
-        dip_str, flow->dst_port,
-        sip_str, flow->src_port,
-        flow->protocol == IPPROTO_TCP ? "tcp" : "udp"
-    );
+    if (flow->int_net == 0) {
+        snprintf(cmd, sizeof(cmd), exec_line,
+            dip_str, flow->dst_port,
+            sip_str, flow->src_port,
+            flow->protocol == IPPROTO_TCP ? "tcp" : "udp"
+        );
+    } else {
+        snprintf(cmd, sizeof(cmd), exec_line,
+            sip_str, flow->src_port,
+            dip_str, flow->dst_port,
+            flow->protocol == IPPROTO_TCP ? "tcp" : "udp"
+        );
+    }
 
     DBG_PRINTF("Executing command: %s\n", cmd);
     char **argv = split_cmd_to_argv(cmd);
@@ -864,7 +876,8 @@ int process_packet(unsigned char *buffer, int length) {
         inet_ntop(AF_INET, &dst_addr, dip_str, sizeof(dip_str));
 
         int protocol_id = -2;
-        if (detect_proto(flow, &protocol_id , protocol_buf)) {
+        if (detect_proto(flow, &protocol_id , protocol_buf, &flow->int_net)) {
+            u_int32_t   proc_ip = (0 == flow->int_net ? flow->dst_ip : flow->src_ip);
 
             DBG_PRINTF("Detected protocol: [%d]%s for flow %s:%d -> %s:%d (after %d packets)\n",
                     protocol_id, protocol_buf,
@@ -872,10 +885,10 @@ int process_packet(unsigned char *buffer, int length) {
                     dip_str, flow->dst_port,
                     flow->packets_processed);
 
-            int idx = zbx_vector_ip_ref_bsearch(&ipset_ips, (ip_ref_t){flow->dst_ip, 0}, zbx_default_uint32_compare_func);
+            int idx = zbx_vector_ip_ref_bsearch(&ipset_ips, (ip_ref_t){proc_ip, 0}, zbx_default_uint32_compare_func);
             if (idx == FAIL)
             {
-                zbx_vector_ip_ref_append(&ipset_ips, (ip_ref_t){flow->dst_ip, 1});
+                zbx_vector_ip_ref_append(&ipset_ips, (ip_ref_t){proc_ip, 1});
                 zbx_vector_ip_ref_sort(&ipset_ips, zbx_default_uint32_compare_func);
             }
             else
@@ -883,11 +896,11 @@ int process_packet(unsigned char *buffer, int length) {
 
             flow->is_detected = 1;
             mark_traffic_exec(flow, add_line);
-            ipset_add_entry(&dst_addr);
+            ipset_add_entry((struct in_addr*)&proc_ip);
 
         } else if (diag_ip != NULL && (strstr(sip_str, diag_ip) != NULL || strstr(dip_str, diag_ip) != NULL)) {
-            DBG_PRINTF("Ignored protocol: %s for flow %s:%d -> %s:%d (after %d packets)\n",
-                    protocol_buf,
+            DBG_PRINTF("Ignored protocol: %s for %s flow %s:%d -> %s:%d (after %d packets)\n",
+                    protocol_buf, flow->int_net == 1 ? "internal" : "external",
                     sip_str, flow->src_port,
                     dip_str, flow->dst_port,
                     flow->packets_processed);
@@ -927,12 +940,13 @@ void cleanup() {
     for (int i = 0; i < flow_count; i++) {
         if (flows[i].is_detected && del_line)
         {
-            int idx = zbx_vector_ip_ref_bsearch(&ipset_ips, (ip_ref_t){flows[i].dst_ip, 0}, zbx_default_uint32_compare_func);
+            uint32_t    proc_ip = (0 == flows[i].int_net ? flows[i].dst_ip : flows[i].src_ip);
+            int idx = zbx_vector_ip_ref_bsearch(&ipset_ips, (ip_ref_t){proc_ip, 0}, zbx_default_uint32_compare_func);
             if (idx != FAIL) {
                 if (ipset_ips.values[idx].count == 1) {
                     mark_traffic_exec(&flows[i], del_line);
                     zbx_vector_ip_ref_remove(&ipset_ips, idx);
-                    ipset_del_entry((struct in_addr*)&flows[i].dst_ip);
+                    ipset_del_entry((struct in_addr*)&proc_ip);
                 } else {
                     ipset_ips.values[idx].count--;
                 }
