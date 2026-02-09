@@ -1,6 +1,33 @@
 #!/bin/sh
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+ndpi_static_set_init()
+{
+    ipset create ${IPSET_NAME}-net hash:net family inet timeout 0 -exist
+
+    if ! iptables -t mangle -S PREROUTING | grep -q -- "--match-set ${IPSET_NAME}-net dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
+        iptables -t mangle -A PREROUTING -m set --match-set "${IPSET_NAME}-net" dst -j MARK --set-mark $FW_MARK
+    fi
+
+    shopt -s nullglob
+    for file in ${SCRIPT_DIR}/*.txt; do
+      echo "Loading from: $file"
+      # Read line-by-line, ignore blanks and comments
+      while IFS= read -r subnet; do
+        # trim leading/trailing whitespace
+        subnet="${subnet#"${subnet%%[![:space:]]*}"}"
+        subnet="${subnet%"${subnet##*[![:space:]]}"}"
+
+        [[ -z "$subnet" || "$subnet" =~ ^# ]] && continue
+
+        ipset add "${IPSET_NAME}-net" "$subnet" -exist 2>/dev/null
+      done < "$file"
+    done
+
+    echo "Done. Current members:"
+    ipset list "${IPSET_NAME}-net" | grep "/"|wc -l
+}
+
 ndpi_init()
 {
     echo "initialization routing"
@@ -22,6 +49,8 @@ ndpi_init()
     #if ! iptables -t mangle -S OUTPUT | grep -q -- "--match-set $IPSET_NAME dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
     #    iptables -t mangle -A OUTPUT -m set --match-set $IPSET_NAME dst -j MARK --set-mark $FW_MARK
     #fi
+
+    ndpi_static_set_init
 
     ip route flush cache
 }
