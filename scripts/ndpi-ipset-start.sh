@@ -1,13 +1,18 @@
 #!/bin/sh
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+test -z ${SCRIPT_DIR} && SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 
-ndpi_static_set_init()
+ndpi_static_ipt_init()
 {
-    ipset create ${IPSET_NAME}-net hash:net family inet timeout 0 -exist
-
     if ! iptables -t mangle -S PREROUTING | grep -q -- "--match-set ${IPSET_NAME}-net dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
         iptables -t mangle -A PREROUTING -m set --match-set "${IPSET_NAME}-net" dst -j MARK --set-mark $FW_MARK
     fi
+}
+
+ndpi_static_init()
+{
+    ipset create ${IPSET_NAME}-net hash:net family inet timeout 0 -exist
+
+    ndpi_static_ipt_init
 
     shopt -s nullglob
     for file in ${SCRIPT_DIR}/*.txt; do
@@ -28,11 +33,22 @@ ndpi_static_set_init()
     ipset list "${IPSET_NAME}-net" | grep "/"|wc -l
 }
 
+ndpi_ipt_init()
+{
+    if ! iptables -t mangle -S PREROUTING | grep -q -- "--match-set $IPSET_NAME dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
+        iptables -t mangle -A PREROUTING -m set --match-set $IPSET_NAME dst -j MARK --set-mark $FW_MARK
+    fi
+    #if ! iptables -t mangle -S OUTPUT | grep -q -- "--match-set $IPSET_NAME dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
+    #    iptables -t mangle -A OUTPUT -m set --match-set $IPSET_NAME dst -j MARK --set-mark $FW_MARK
+    #fi
+}
+
 ndpi_init()
 {
     echo "initialization routing"
-    #if ! grep -q "^321[[:space:]]\+rt_vpn$" /opt/etc/iproute2/rt_tables; then
-    #    echo "321 rt_vpn" >> /opt/etc/iproute2/rt_tables
+
+    #if ! grep -q "^371[[:space:]]\+rt_riga$" /opt/etc/iproute2/rt_tables; then
+    #    echo "371 rt_riga" >> /opt/etc/iproute2/rt_tables
     #fi
     if ! ip route show table $RT_NAME | grep -q "^default dev $WG_INTERFACE"; then
         ip route add default dev $WG_INTERFACE table $RT_NAME
@@ -43,14 +59,9 @@ ndpi_init()
 
     ipset create $IPSET_NAME hash:ip timeout 0 -exist
 
-    if ! iptables -t mangle -S PREROUTING | grep -q -- "--match-set $IPSET_NAME dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
-        iptables -t mangle -A PREROUTING -m set --match-set $IPSET_NAME dst -j MARK --set-mark $FW_MARK
-    fi
-    #if ! iptables -t mangle -S OUTPUT | grep -q -- "--match-set $IPSET_NAME dst -j MARK --set-xmark $FW_MARK/0xffffffff"; then
-    #    iptables -t mangle -A OUTPUT -m set --match-set $IPSET_NAME dst -j MARK --set-mark $FW_MARK
-    #fi
+    ndpi_ipt_init
 
-    ndpi_static_set_init
+    ndpi_static_init
 
     ip route flush cache
 }
@@ -115,6 +126,11 @@ case "$1" in
     init)
         ndpi_export
         ndpi_init
+        ;;
+    ipt_init)
+        ndpi_export
+        ndpi_ipt_init
+        ndpi_static_ipt_init
         ;;
     ndpi_export)
         ndpi_export

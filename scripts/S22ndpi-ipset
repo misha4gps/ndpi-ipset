@@ -3,7 +3,7 @@
 ENABLED=yes
 
 PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/home/ndpi
-. ndpi-ipset-start.sh ndpi_export
+SCRIPT_DIR=/opt/home/ndpi . ndpimarker-start.sh ndpi_export
 PROCS=$ndpi_path
 DESC="$PROCS programm"
 
