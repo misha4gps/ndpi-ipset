@@ -25,6 +25,14 @@ extern char **environ;
 
 #include "zbxalgo.h"
 
+#if NDPI_VER >= 5
+#define NDPI_PROTO_APP(p)    (p).proto.app_protocol
+#define NDPI_PROTO_MASTER(p) (p).proto.master_protocol
+#else
+#define NDPI_PROTO_APP(p)    (p).app_protocol
+#define NDPI_PROTO_MASTER(p) (p).master_protocol
+#endif
+
 
 #define MAX_FLOWS 2000
 #define IDLE_TIMEOUT (60*5) // 5 minutes
@@ -147,10 +155,10 @@ int detect_proto(const struct flow_info *flow, int *protocol_id, const char *app
 
     if (
         (*protocol_id = zbx_vector_uint16_bsearch(
-            &detected_protocols, protocol.app_protocol, zbx_default_uint16_compare_func)
+            &detected_protocols, NDPI_PROTO_APP(protocol), zbx_default_uint16_compare_func)
         ) != FAIL || 
         (*protocol_id = zbx_vector_uint16_bsearch(
-            &detected_protocols, protocol.master_protocol, zbx_default_uint16_compare_func)
+            &detected_protocols, NDPI_PROTO_MASTER(protocol), zbx_default_uint16_compare_func)
         ) != FAIL
     ) {
         if (0 != (*int_net = is_internal_ip(flow->dst_ip)) && 0 != is_internal_ip(flow->src_ip)) {
@@ -283,6 +291,7 @@ int init_raw_socket(const char *interface) {
 }
 
 int init_ndpi() {
+#if NDPI_VER < 5
     NDPI_PROTOCOL_BITMASK all;
 
     ndpi_ctx = ndpi_init_detection_module(ndpi_no_prefs);
@@ -293,8 +302,21 @@ int init_ndpi() {
 
     NDPI_BITMASK_SET_ALL(all);
     ndpi_set_protocol_detection_bitmask2(ndpi_ctx, &all);
-
     ndpi_finalize_initialization(ndpi_ctx);
+#else
+    ndpi_ctx = ndpi_init_detection_module(NULL);
+    if (ndpi_ctx == NULL) {
+        fprintf(stderr, "Error initializing nDPI\n");
+        return -1;
+    }
+
+    if (ndpi_finalize_initialization(ndpi_ctx) != 0) {
+        fprintf(stderr, "Error finalizing nDPI initialization\n");
+        ndpi_exit_detection_module(ndpi_ctx);
+        ndpi_ctx = NULL;
+        return -1;
+    }
+#endif
 
     printf("nDPI initialized successfully\n");
     return 0;
@@ -835,16 +857,24 @@ int process_packet(unsigned char *buffer, int length) {
         return 0;
     }
 
+#if NDPI_VER < 5
     protocol = ndpi_detection_process_packet(
         ndpi_ctx, flow->ndpi_flow,
         iphdr_buf, iphdr_buf_len,
         time(NULL)
     );
+#else
+    protocol = ndpi_detection_process_packet(
+        ndpi_ctx, flow->ndpi_flow,
+        iphdr_buf, iphdr_buf_len,
+        (uint64_t)time(NULL) * 1000, NULL
+    );
+#endif
 
     flow->detected_protocol = protocol;
 
-    if (protocol.app_protocol != NDPI_PROTOCOL_UNKNOWN || 
-        protocol.master_protocol != NDPI_PROTOCOL_UNKNOWN) {
+    if (NDPI_PROTO_APP(protocol) != NDPI_PROTOCOL_UNKNOWN ||
+        NDPI_PROTO_MASTER(protocol) != NDPI_PROTOCOL_UNKNOWN) {
 
         flow->detection_completed = 1;
 
@@ -853,18 +883,18 @@ int process_packet(unsigned char *buffer, int length) {
         src_addr.s_addr = flow->src_ip;
         dst_addr.s_addr = flow->dst_ip;
 
-        const char *app_proto = ndpi_get_proto_name(ndpi_ctx, protocol.app_protocol);
-        const char *master_proto = ndpi_get_proto_name(ndpi_ctx, protocol.master_protocol);
+        const char *app_proto = ndpi_get_proto_name(ndpi_ctx, NDPI_PROTO_APP(protocol));
+        const char *master_proto = ndpi_get_proto_name(ndpi_ctx, NDPI_PROTO_MASTER(protocol));
 
-        if (protocol.master_protocol != NDPI_PROTOCOL_UNKNOWN && 
-            protocol.app_protocol != NDPI_PROTOCOL_UNKNOWN) {
-            snprintf(protocol_buf, sizeof(protocol_buf), "%s.%s", 
+        if (NDPI_PROTO_MASTER(protocol) != NDPI_PROTOCOL_UNKNOWN &&
+            NDPI_PROTO_APP(protocol) != NDPI_PROTOCOL_UNKNOWN) {
+            snprintf(protocol_buf, sizeof(protocol_buf), "%s.%s",
                     master_proto ? master_proto : "Unknown",
                     app_proto ? app_proto : "Unknown");
-        } else if (protocol.app_protocol != NDPI_PROTOCOL_UNKNOWN) {
+        } else if (NDPI_PROTO_APP(protocol) != NDPI_PROTOCOL_UNKNOWN) {
             snprintf(protocol_buf, sizeof(protocol_buf), "%s", 
                     app_proto ? app_proto : "Unknown");
-        } else if (protocol.master_protocol != NDPI_PROTOCOL_UNKNOWN) {
+        } else if (NDPI_PROTO_MASTER(protocol) != NDPI_PROTOCOL_UNKNOWN) {
             snprintf(protocol_buf, sizeof(protocol_buf), "%s", 
                     master_proto ? master_proto : "Unknown");
         } else {
